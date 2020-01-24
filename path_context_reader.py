@@ -144,7 +144,8 @@ class PathContextReader:
         if self.estimator_action.is_predict:
             dataset = dataset.batch(1)
         else:
-            dataset = dataset.filter(self._filter_input_rows)
+            if self.config.FILTER_EMPTY_ROWS:
+                dataset = dataset.filter(self._filter_input_rows)
             dataset = dataset.batch(batch_size)
 
         dataset = dataset.prefetch(buffer_size=40)  # original: tf.contrib.data.AUTOTUNE) -- got OOM err; 10 seems promising.

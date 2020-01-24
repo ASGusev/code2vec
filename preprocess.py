@@ -20,16 +20,18 @@ def save_dictionaries(dataset_name, word_to_count, path_to_count, target_to_coun
         print('Dictionaries saved to: {}'.format(save_dict_file_path))
 
  
-def process_file(file_path, data_file_role, dataset_name, word_to_count, path_to_count, max_contexts):
+def process_file(file_path, data_file_role, names_path, dataset_name, word_to_count, path_to_count, max_contexts):
     sum_total = 0
     sum_sampled = 0
     total = 0
     empty = 0
     max_unfiltered = 0
+    total_contexts, partial_contexts, full_contexts = 0, 0, 0
     output_path = '{}.{}.c2v'.format(dataset_name, data_file_role)
-    with open(output_path, 'w') as outfile:
-        with open(file_path, 'r') as file:
-            for line in file:
+    names_output_path = '{}.{}.names.txt'.format(dataset_name, data_file_role)
+    with open(output_path, 'w') as outfile, open(names_output_path, 'w') as names_outfile:
+        with open(file_path, 'r') as file, open(names_path, 'r') as names_file:
+            for line, name in zip(file, names_file):
                 parts = line.rstrip('\n').split(' ')
                 target_name = parts[0]
                 contexts = parts[1:]
@@ -38,14 +40,16 @@ def process_file(file_path, data_file_role, dataset_name, word_to_count, path_to
                     max_unfiltered = len(contexts)
                 sum_total += len(contexts)
 
+                context_parts = [c.split(',') for c in contexts]
+                full_found_contexts = [c for i, c in enumerate(contexts)
+                                       if c and context_full_found(context_parts[i], word_to_count, path_to_count)]
+                partial_found_contexts = [c for i, c in enumerate(contexts)
+                                          if c and context_partial_found(context_parts[i], word_to_count, path_to_count)
+                                          and not context_full_found(context_parts[i], word_to_count, path_to_count)]
+                total_contexts += len(contexts)
+                full_contexts += len(full_found_contexts)
+                partial_contexts += len(partial_found_contexts)
                 if len(contexts) > max_contexts:
-                    context_parts = [c.split(',') for c in contexts]
-                    full_found_contexts = [c for i, c in enumerate(contexts)
-                                           if context_full_found(context_parts[i], word_to_count, path_to_count)]
-                    partial_found_contexts = [c for i, c in enumerate(contexts)
-                                              if context_partial_found(context_parts[i], word_to_count, path_to_count)
-                                              and not context_full_found(context_parts[i], word_to_count,
-                                                                         path_to_count)]
                     if len(full_found_contexts) > max_contexts:
                         contexts = random.sample(full_found_contexts, max_contexts)
                     elif len(full_found_contexts) <= max_contexts \
@@ -63,14 +67,19 @@ def process_file(file_path, data_file_role, dataset_name, word_to_count, path_to
 
                 csv_padding = " " * (max_contexts - len(contexts))
                 outfile.write(target_name + ' ' + " ".join(contexts) + csv_padding + '\n')
+                names_outfile.write(name)
                 total += 1
 
-    print('File: ' + data_file_path)
+    print('File: ' + file_path)
     print('Average total contexts: ' + str(float(sum_total) / total))
     print('Average final (after sampling) contexts: ' + str(float(sum_sampled) / total))
     print('Total examples: ' + str(total))
     print('Empty examples: ' + str(empty))
     print('Max number of contexts per word: ' + str(max_unfiltered))
+    print('Total contexts: ' + str(total_contexts))
+    print('Fully covered contexts: ' + str(full_contexts))
+    print('Partially covered contexts: ' + str(partial_contexts))
+    print()
     return total
 
 
@@ -92,6 +101,14 @@ if __name__ == '__main__':
                         help="path to test data file", required=True)
     parser.add_argument("-vd", "--val_data", dest="val_data_path",
                         help="path to validation data file", required=True)
+    
+    parser.add_argument("-trn", "--train_names", dest="train_names_path",
+                        help="path to training names file", required=True)
+    parser.add_argument("-ten", "--test_names", dest="test_names_path",
+                        help="path to test names file", required=True)
+    parser.add_argument("-vn", "--val_names", dest="val_names_path",
+                        help="path to validation names file", required=True)
+    
     parser.add_argument("-mc", "--max_contexts", dest="max_contexts", default=200,
                         help="number of max contexts to keep", required=False)
     parser.add_argument("-wvs", "--word_vocab_size", dest="word_vocab_size", default=1301136,
@@ -114,6 +131,9 @@ if __name__ == '__main__':
     train_data_path = args.train_data_path
     test_data_path = args.test_data_path
     val_data_path = args.val_data_path
+    train_names_path = args.train_names_path
+    test_names_path = args.test_names_path
+    val_names_path = args.val_names_path
     word_histogram_path = args.word_histogram
     path_histogram_path = args.path_histogram
 
@@ -129,10 +149,12 @@ if __name__ == '__main__':
                                                                        return_counts=True)
 
     num_training_examples = 0
-    for data_file_path, data_role in zip([test_data_path, val_data_path, train_data_path], ['test', 'val', 'train']):
+    for data_file_path, data_role, names_file_path in zip(
+            [test_data_path, val_data_path, train_data_path], ['test', 'val', 'train'],
+            [test_names_path, val_names_path, train_names_path]):
         num_examples = process_file(file_path=data_file_path, data_file_role=data_role, dataset_name=args.output_name,
                                     word_to_count=word_to_count, path_to_count=path_to_count,
-                                    max_contexts=int(args.max_contexts))
+                                    max_contexts=int(args.max_contexts), names_path=names_file_path)
         if data_role == 'train':
             num_training_examples = num_examples
 

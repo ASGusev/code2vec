@@ -41,6 +41,8 @@ class Config:
                             help="path to store logs into. if not given logs are not saved to file.")
         parser.add_argument('-tb', '--tensorboard', dest='use_tensorboard', action='store_true',
                             help='use tensorboard during training')
+        parser.add_argument('--no_filtering', dest='filter_empty_rows', action='store_false',
+                            help='Turns off filtering rows with no tokens or paths in dictionaries')
         return parser
 
     def set_defaults(self):
@@ -57,10 +59,10 @@ class Config:
         self.MAX_TO_KEEP = 10
 
         # model hyper-params
-        self.MAX_CONTEXTS = 200
-        self.MAX_TOKEN_VOCAB_SIZE = 1301136
-        self.MAX_TARGET_VOCAB_SIZE = 261245
-        self.MAX_PATH_VOCAB_SIZE = 911417
+        self.MAX_CONTEXTS = 300
+        self.MAX_TOKEN_VOCAB_SIZE = 500000
+        self.MAX_TARGET_VOCAB_SIZE = 500000
+        self.MAX_PATH_VOCAB_SIZE = 500000
         self.DEFAULT_EMBEDDINGS_SIZE = 128
         self.TOKEN_EMBEDDINGS_SIZE = self.DEFAULT_EMBEDDINGS_SIZE
         self.PATH_EMBEDDINGS_SIZE = self.DEFAULT_EMBEDDINGS_SIZE
@@ -85,6 +87,7 @@ class Config:
         self.LOGS_PATH = args.logs_path
         self.DL_FRAMEWORK = 'tensorflow' if not args.dl_framework else args.dl_framework
         self.USE_TENSORBOARD = args.use_tensorboard
+        self.FILTER_EMPTY_ROWS = args.filter_empty_rows
 
     def __init__(self, set_defaults: bool = False, load_from_args: bool = False, verify: bool = False):
         self.NUM_TRAIN_EPOCHS: int = 0
@@ -126,6 +129,7 @@ class Config:
         self.LOGS_PATH: Optional[str] = None
         self.DL_FRAMEWORK: str = ''  # in {'keras', 'tensorflow'}
         self.USE_TENSORBOARD: bool = False
+        self.FILTER_EMPTY_ROWS = True
 
         # Automatically filled by `Code2VecModelBase._init_num_of_examples()`.
         self.NUM_TRAIN_EXAMPLES: int = 0

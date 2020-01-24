@@ -4,12 +4,16 @@ import time
 from typing import Dict, Optional, List, Iterable
 from collections import Counter
 from functools import partial
+import os
 
 from path_context_reader import PathContextReader, ModelInputTensorsFormer, ReaderInputTensors, EstimatorAction
 from common import common
 from vocabularies import VocabType
 from config import Config
 from model_base import Code2VecModelBase, ModelEvaluationResults, ModelPredictionResults
+
+
+EXTRA_VALIDATION_PERIOD = -1
 
 
 tf.compat.v1.disable_eager_execution()
@@ -28,6 +32,7 @@ class Code2VecModel(Code2VecModelBase):
         self.predict_placeholder = None
         self.eval_top_words_op, self.eval_top_values_op, self.eval_original_names_op, self.eval_code_vectors = None, None, None, None
         self.predict_top_words_op, self.predict_top_values_op, self.predict_original_names_op = None, None, None
+        self.loss_graph = None
 
         self.vocab_type_to_tf_variable_name_mapping: Dict[VocabType, str] = {
             VocabType.Token: 'WORDS_VOCAB',
@@ -70,8 +75,20 @@ class Code2VecModel(Code2VecModelBase):
         self.sess.run(input_iterator_reset_op)
         time.sleep(1)
         self.log('Started reader...')
+
+        training_logger = None
+        os.makedirs('losses_logs/', exist_ok=True)
+        loss_log_path = 'losses_logs/losses_log' + common.now_str()[:-2] + '.csv'
+        e_loss_log_path = 'losses_logs/losses_log' + common.now_str()[:-2] + '.csv' if EXTRA_VALIDATION_PERIOD > 0 else None
+        if self.config.USE_TENSORBOARD:
+            log_dir = "logs/scalars/train_" + common.now_str()[:-2]
+            training_logger = tf.summary.create_file_writer(log_dir)
+            self.sess.run(training_logger.init())
+            training_logger.set_as_default()
         # run evaluation in a loop until iterator is exhausted.
         try:
+            epoch_losses = []
+            extra_losses = []
             while True:
                 # Each iteration = batch. We iterate as long as the tf iterator (reader) yields batches.
                 batch_num += 1
@@ -80,6 +97,10 @@ class Code2VecModel(Code2VecModelBase):
                 _, batch_loss = self.sess.run([optimizer, train_loss])
 
                 sum_loss += batch_loss
+                epoch_losses.append(batch_loss)
+                extra_losses.append(batch_loss)
+                # if self.config.USE_TENSORBOARD:
+                #     self.sess.run(tf.summary.scalar('batch_loss', batch_loss, step=batch_num))
                 if batch_num % self.config.NUM_BATCHES_TO_LOG_PROGRESS == 0:
                     self._trace_training(sum_loss, batch_num, multi_batch_start_time)
                     # Uri: the "shuffle_batch/random_shuffle_queue_Size:0" op does not exist since the migration to the new reader.
@@ -87,6 +108,27 @@ class Code2VecModel(Code2VecModelBase):
                     #    "shuffle_batch/random_shuffle_queue_Size:0"))
                     sum_loss = 0
                     multi_batch_start_time = time.time()
+                if EXTRA_VALIDATION_PERIOD > 0 and batch_num % EXTRA_VALIDATION_PERIOD == 0:
+                    evaluation_results = self.evaluate()
+                    evaluation_results_str = (str(evaluation_results).replace('topk', 'top{}'.format(
+                        self.config.TOP_K_WORDS_CONSIDERED_DURING_PREDICTION)))
+                    extra_mean_train_loss = np.mean(extra_losses) / self.config.TRAIN_BATCH_SIZE
+                    extra_losses.clear()
+                    print(f'Losses: train: {extra_mean_train_loss}, validation: {evaluation_results.loss}')
+                    with open(e_loss_log_path, 'at') as loss_log_file:
+                        loss_log_file.write(f'{extra_mean_train_loss},{evaluation_results.loss}\n')
+                    if self.config.USE_TENSORBOARD:
+                        self.sess.run([
+                            tf.summary.scalar('e_precision', evaluation_results.subtoken_precision, step=batch_num),
+                            tf.summary.scalar('e_recall', evaluation_results.subtoken_recall, step=batch_num),
+                            tf.summary.scalar('e_f1', evaluation_results.subtoken_f1, step=batch_num),
+                            tf.summary.scalar('e_train_loss', extra_mean_train_loss, step=batch_num),
+                            tf.summary.scalar('e_validation_loss', evaluation_results.loss, step=batch_num),
+                        ])
+                        self.sess.run([tf.summary.scalar(f'e_top{i}_acc', top_i_acc, step=batch_num)
+                                       for i, top_i_acc in enumerate(evaluation_results.topk_acc)])
+                        self.sess.run(training_logger.flush())
+                    self.log(f'After {batch_num} batches -- {evaluation_results_str}')
                 if batch_num % num_batches_to_save_and_eval == 0:
                     epoch_num = int((batch_num / num_batches_to_save_and_eval) * self.config.SAVE_EVERY_EPOCHS)
                     model_save_path = self.config.MODEL_SAVE_PATH + '_iter' + str(epoch_num)
@@ -95,6 +137,22 @@ class Code2VecModel(Code2VecModelBase):
                     evaluation_results = self.evaluate()
                     evaluation_results_str = (str(evaluation_results).replace('topk', 'top{}'.format(
                         self.config.TOP_K_WORDS_CONSIDERED_DURING_PREDICTION)))
+                    epoch_mean_train_loss = np.mean(epoch_losses) / self.config.TRAIN_BATCH_SIZE
+                    epoch_losses.clear()
+                    print(f'Losses: train: {epoch_mean_train_loss}, validation: {evaluation_results.loss}')
+                    with open(loss_log_path, 'at') as loss_log_file:
+                        loss_log_file.write(f'{epoch_mean_train_loss},{evaluation_results.loss}\n')
+                    if self.config.USE_TENSORBOARD:
+                        self.sess.run([
+                            tf.summary.scalar('precision', evaluation_results.subtoken_precision, step=epoch_num),
+                            tf.summary.scalar('recall', evaluation_results.subtoken_recall, step=epoch_num),
+                            tf.summary.scalar('f1', evaluation_results.subtoken_f1, step=epoch_num),
+                            tf.summary.scalar('train_loss', epoch_mean_train_loss, step=epoch_num),
+                            tf.summary.scalar('validation_loss', evaluation_results.loss, step=epoch_num),
+                        ])
+                        self.sess.run([tf.summary.scalar(f'top{i}_acc', top_i_acc, step=epoch_num)
+                                       for i, top_i_acc in enumerate(evaluation_results.topk_acc)])
+                        self.sess.run(training_logger.flush())
                     self.log('After {nr_epochs} epochs -- {evaluation_results}'.format(
                         nr_epochs=epoch_num,
                         evaluation_results=evaluation_results_str
@@ -122,7 +180,7 @@ class Code2VecModel(Code2VecModelBase):
             input_tensors = input_iterator.get_next()
 
             self.eval_top_words_op, self.eval_top_values_op, self.eval_original_names_op, _, _, _, _, \
-                self.eval_code_vectors = self._build_tf_test_graph(input_tensors)
+                self.eval_code_vectors, self.loss_graph = self._build_tf_test_graph(input_tensors, loss=True)
             self.saver = tf.compat.v1.train.Saver()
 
         if self.config.MODEL_LOAD_PATH and not self.config.TRAIN_DATA_PATH_PREFIX:
@@ -153,11 +211,13 @@ class Code2VecModel(Code2VecModelBase):
             # Run evaluation in a loop until iterator is exhausted.
             # Each iteration = batch. We iterate as long as the tf iterator (reader) yields batches.
             try:
+                loss_values = []
                 while True:
-                    top_words, top_scores, original_names, code_vectors = self.sess.run(
+                    top_words, top_scores, original_names, code_vectors, loss_value = self.sess.run(
                         [self.eval_top_words_op, self.eval_top_values_op,
-                         self.eval_original_names_op, self.eval_code_vectors],
+                         self.eval_original_names_op, self.eval_code_vectors, self.loss_graph],
                     )
+                    loss_values.append(loss_value)
 
                     # shapes:
                     #   top_words: (batch, top_k);   top_scores: (batch, top_k)
@@ -180,6 +240,7 @@ class Code2VecModel(Code2VecModelBase):
                         self._trace_evaluation(total_predictions, elapsed)
             except tf.errors.OutOfRangeError:
                 pass  # reader iterator is exhausted and have no more batches to produce.
+            mean_loss_value = sum(loss_values) / (len(loss_values) * self.config.TEST_BATCH_SIZE)
             self.log('Done evaluating, epoch reached')
             log_output_file.write(str(topk_accuracy_evaluation_metric.topk_correct_predictions) + '\n')
         if self.config.EXPORT_CODE_VECTORS:
@@ -191,7 +252,9 @@ class Code2VecModel(Code2VecModelBase):
             topk_acc=topk_accuracy_evaluation_metric.topk_correct_predictions,
             subtoken_precision=subtokens_evaluation_metric.precision,
             subtoken_recall=subtokens_evaluation_metric.recall,
-            subtoken_f1=subtokens_evaluation_metric.f1)
+            subtoken_f1=subtokens_evaluation_metric.f1,
+            loss=mean_loss_value
+        )
 
     def _build_tf_training_graph(self, input_tensors):
         # Use `_TFTrainModelInputTensorsFormer` to access input tensors by name.
@@ -263,7 +326,7 @@ class Code2VecModel(Code2VecModelBase):
 
         return code_vectors, attention_weights
 
-    def _build_tf_test_graph(self, input_tensors, normalize_scores=False):
+    def _build_tf_test_graph(self, input_tensors, normalize_scores=False, loss=False):
         with tf.compat.v1.variable_scope('model', reuse=self.get_should_reuse_variables()):
             tokens_vocab = tf.compat.v1.get_variable(
                 self.vocab_type_to_tf_variable_name_mapping[VocabType.Token],
@@ -303,6 +366,14 @@ class Code2VecModel(Code2VecModelBase):
         top_scores = topk_candidates.values
         if normalize_scores:
             top_scores = tf.nn.softmax(top_scores)
+
+        if loss:
+            batch_size = tf.cast(tf.shape(input_tensors.target_index)[0], dtype=tf.float32)
+            loss = tf.reduce_sum(tf.nn.sparse_softmax_cross_entropy_with_logits(
+                labels=tf.reshape(input_tensors.target_index, [-1]),
+                logits=scores)) / batch_size
+            return top_words, top_scores, original_words, attention_weights, input_tensors.path_source_token_strings, \
+                   input_tensors.path_strings, input_tensors.path_target_token_strings, code_vectors, loss
 
         return top_words, top_scores, original_words, attention_weights, input_tensors.path_source_token_strings, \
                input_tensors.path_strings, input_tensors.path_target_token_strings, code_vectors
@@ -532,7 +603,7 @@ class _TFEvaluateModelInputTensorsFormer(ModelInputTensorsFormer):
         return input_tensors.target_string, input_tensors.path_source_token_indices, input_tensors.path_indices, \
                input_tensors.path_target_token_indices, input_tensors.context_valid_mask, \
                input_tensors.path_source_token_strings, input_tensors.path_strings, \
-               input_tensors.path_target_token_strings
+               input_tensors.path_target_token_strings, input_tensors.target_index
 
     def from_model_input_form(self, input_row) -> ReaderInputTensors:
         return ReaderInputTensors(
@@ -543,5 +614,6 @@ class _TFEvaluateModelInputTensorsFormer(ModelInputTensorsFormer):
             context_valid_mask=input_row[4],
             path_source_token_strings=input_row[5],
             path_strings=input_row[6],
-            path_target_token_strings=input_row[7]
+            path_target_token_strings=input_row[7],
+            target_index=input_row[8]
         )
